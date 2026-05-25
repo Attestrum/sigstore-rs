@@ -19,6 +19,13 @@ pub enum ProposedEntry {
         #[serde(rename = "spec")]
         spec: serde_json::Value,
     },
+    #[serde(rename = "dsse")]
+    Dsse {
+        #[serde(rename = "apiVersion")]
+        api_version: String,
+        #[serde(rename = "spec")]
+        spec: serde_json::Value,
+    },
     #[serde(rename = "hashedrekord")]
     Hashedrekord {
         #[serde(rename = "apiVersion")]

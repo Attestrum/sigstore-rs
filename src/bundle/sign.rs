@@ -218,6 +218,98 @@ impl<'ctx> SigningSession<'ctx> {
 
         self.sign_digest(hasher).await
     }
+
+    /// Signs `payload` as a DSSE-wrapped in-toto attestation and emits a
+    /// Sigstore Bundle v0.3 with `Content::DsseEnvelope` plus a Rekor v1
+    /// `dsse@0.0.1` transparency-log entry.
+    ///
+    /// The signed bytes are the DSSE Pre-Authentication Encoding (PAE) of
+    /// `(payload_type, payload)`, not the payload itself — see
+    /// <https://github.com/secure-systems-lab/dsse/blob/master/protocol.md>.
+    /// `payload_type` is canonically `"application/vnd.in-toto+json"` for
+    /// in-toto v1 Statements; the payload is the raw canonical JSON bytes.
+    ///
+    /// If the session is expired, [`SigstoreError::ExpiredSigningSession`]
+    /// is returned. Network errors against Fulcio (cert issuance happens
+    /// at session-construction time) and Rekor (entry submission) surface
+    /// as their existing error variants.
+    pub async fn sign_dsse(&self, payload_type: &str, payload: &[u8]) -> SigstoreResult<Bundle> {
+        if self.is_expired() {
+            return Err(SigstoreError::ExpiredSigningSession());
+        }
+
+        if let Some(detached_sct) = &self.certs.detached_sct {
+            verify_sct(detached_sct, &self.context.ctfe_keyring)?;
+        } else {
+            let sct = CertificateEmbeddedSCT::new(&self.certs.cert, &self.certs.chain)?;
+            verify_sct(&sct, &self.context.ctfe_keyring)?;
+        }
+
+        // DSSE PAE: "DSSEv1 <len(type)> <type> <len(payload)> <payload>".
+        // Sign the PAE bytes (SHA-256 + ECDSA-P256) with the ephemeral key.
+        let pae = crate::bundle::verify::models::compute_pae(payload_type, payload);
+        let mut pae_hasher = Sha256::new();
+        pae_hasher.update(&pae);
+        let signature: p256::ecdsa::Signature = self.private_key.sign_digest(pae_hasher);
+        let signature_bytes = signature.to_der().as_bytes().to_owned();
+
+        // Build the DSSE envelope. The `io.intoto.Envelope` proto-derived
+        // type is the same type carried inside `Bundle.content` so the
+        // bytes we hand to Rekor for `envelopeHash` will round-trip
+        // through verify-side `serde_json::to_vec(&dsse)` identically.
+        let envelope = sigstore_protobuf_specs::io::intoto::Envelope {
+            payload: payload.to_vec(),
+            payload_type: payload_type.to_owned(),
+            signatures: vec![sigstore_protobuf_specs::io::intoto::Signature {
+                sig: signature_bytes.clone(),
+                keyid: String::new(),
+            }],
+        };
+        let envelope_json = serde_json::to_string(&envelope)?;
+
+        // Submit a Rekor v1 `dsse@0.0.1` proposed-content entry. Rekor
+        // computes envelopeHash + payloadHash server-side and returns the
+        // canonicalized body containing those plus the verifier cert.
+        let cert_pem = self.certs.cert.to_pem(pkcs8::LineEnding::LF)?;
+        let proposed_entry = ProposedLogEntry::Dsse {
+            api_version: "0.0.1".to_owned(),
+            spec: serde_json::json!({
+                "proposedContent": {
+                    "envelope": envelope_json,
+                    "verifiers": [base64.encode(cert_pem.as_bytes())],
+                }
+            }),
+        };
+
+        let log_entry = create_log_entry(&self.context.rekor_config, proposed_entry)
+            .await
+            .map_err(|err| SigstoreError::RekorClientError(err.to_string()))?;
+        let log_entry: TransparencyLogEntry =
+            log_entry
+                .try_into()
+                .or(Err(SigstoreError::RekorClientError(
+                    "Rekor returned malformed LogEntry".into(),
+                )))?;
+
+        // Assemble Sigstore Bundle v0.3 with DSSE envelope content.
+        let x509_certificate_chain = X509CertificateChain {
+            certificates: vec![X509Certificate {
+                raw_bytes: self.certs.cert.to_der()?,
+            }],
+        };
+        let verification_material = Some(VerificationMaterial {
+            timestamp_verification_data: None,
+            tlog_entries: vec![log_entry],
+            content: Some(verification_material::Content::X509CertificateChain(
+                x509_certificate_chain,
+            )),
+        });
+        Ok(Bundle {
+            media_type: Version::Bundle0_3.to_string(),
+            verification_material,
+            content: Some(bundle::Content::DsseEnvelope(envelope)),
+        })
+    }
 }
 
 pub mod blocking {
@@ -258,6 +350,14 @@ pub mod blocking {
             let mut hasher = Sha256::new();
             io::copy(&mut input, &mut hasher)?;
             self.rt.block_on(self.inner.sign_digest(hasher))
+        }
+
+        /// Blocking variant of [`AsyncSigningSession::sign_dsse`]. Emits a
+        /// Sigstore Bundle v0.3 with a DSSE envelope and a Rekor v1
+        /// `dsse@0.0.1` transparency-log entry.
+        pub fn sign_dsse(&self, payload_type: &str, payload: &[u8]) -> SigstoreResult<Bundle> {
+            self.rt
+                .block_on(self.inner.sign_dsse(payload_type, payload))
         }
     }
 }
