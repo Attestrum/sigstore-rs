@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use super::{
-    AlpineAllOf, HashedrekordAllOf, HelmAllOf, IntotoAllOf, JarAllOf, RekordAllOf, Rfc3161AllOf,
-    RpmAllOf, TufAllOf,
+    AlpineAllOf, DsseAllOf, HashedrekordAllOf, HelmAllOf, IntotoAllOf, JarAllOf, RekordAllOf,
+    Rfc3161AllOf, RpmAllOf, TufAllOf,
 };
 
 /// Stores the response returned by Rekor after making a new entry
@@ -70,6 +70,7 @@ impl FromStr for LogEntry {
 #[allow(non_camel_case_types)]
 pub enum Body {
     alpine(AlpineAllOf),
+    dsse(DsseAllOf),
     helm(HelmAllOf),
     jar(JarAllOf),
     rfc3161(Rfc3161AllOf),
@@ -257,6 +258,39 @@ mod tests {
         nYLr0lg6RXowI/QV/RE1azBn4Eg5/2uTOMbhB1/gfcHzijzFi9Tk+g1Prg==
         -----END PUBLIC KEY-----
     "#;
+
+    /// Regression guard: Rekor v1 `dsse@0.0.1` entries get a canonicalized
+    /// `body` whose `kind` discriminator is `"dsse"`. Without a matching
+    /// `Body::dsse(DsseAllOf)` variant, the `LogEntry::from_str` codepath
+    /// at line 58 panics via `decode_body(...).expect("Failed to decode Body")`
+    /// any time a downstream caller (e.g. `SigningSession::sign_dsse`)
+    /// submits a dsse entry and reads back the Rekor response.
+    #[test]
+    fn test_dsse_body_kind_parses_without_panic() {
+        // The base64 below decodes to:
+        // {"apiVersion":"0.0.1","kind":"dsse","spec":{"proposedContent":{"envelope":"{}","verifiers":[]}}}
+        let dsse_log_entry = r#"
+        {
+            "body": "eyJhcGlWZXJzaW9uIjoiMC4wLjEiLCJraW5kIjoiZHNzZSIsInNwZWMiOnsicHJvcG9zZWRDb250ZW50Ijp7ImVudmVsb3BlIjoie30iLCJ2ZXJpZmllcnMiOltdfX19",
+            "integratedTime": 1748109600,
+            "logID": "d32f30a3c32d639c2b762205a21c7bb07788e68283a4ae6f42118723a1bea496",
+            "logIndex": 1,
+            "verification": {
+                "signedEntryTimestamp": "MEUCIQ=="
+            }
+        }
+        "#;
+        let entry = LogEntry::from_str(dsse_log_entry)
+            .expect("LogEntry::from_str must parse a dsse-kind body without panic");
+        match entry.body {
+            super::Body::dsse(all_of) => {
+                assert_eq!(all_of.api_version, "0.0.1");
+            }
+            other => panic!("expected Body::dsse, got {other:?}"),
+        }
+        assert_eq!(entry.integrated_time, 1_748_109_600);
+        assert_eq!(entry.log_index, 1);
+    }
 
     #[test]
     fn test_inclusion_proof_valid() {
