@@ -106,7 +106,8 @@ impl<'ctx> SigningSession<'ctx> {
                                     .unverified_claims()
                                     .email
                                     .as_deref()
-                                    .unwrap_or(""),
+                                    .unwrap_or("")
+                                    .as_bytes(),
                             )?,
                         }
                     ].try_into()?
