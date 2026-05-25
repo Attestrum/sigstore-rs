@@ -8,7 +8,10 @@ use sigstore_protobuf_specs::dev::sigstore::{
     rekor::v1::{Checkpoint, InclusionPromise, InclusionProof, KindVersion, TransparencyLogEntry},
 };
 
-use crate::rekor::models::{LogEntry as RekorLogEntry, log_entry::RekorInclusionProof};
+use crate::rekor::models::{
+    LogEntry as RekorLogEntry,
+    log_entry::{Body, RekorInclusionProof},
+};
 
 // Known Sigstore bundle media types.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +76,25 @@ impl TryFrom<RekorLogEntry> for TransparencyLogEntry {
     type Error = ();
 
     fn try_from(value: RekorLogEntry) -> Result<Self, Self::Error> {
+        // Derive kind/version from the actual Rekor body variant so the
+        // bundle's tlogEntries[0].kindVersion matches the canonicalized
+        // body that downstream verifiers (cosign, sigstore-go) parse. The
+        // earlier hardcoded `hashedrekord/0.0.1` produced cross-layer
+        // disagreement once `SigningSession::sign_dsse` started submitting
+        // dsse@0.0.1 entries (sigstore-go's pkg/tlog/entry.go rejects on
+        // "kind and version mismatch").
+        let (kind, version) = match &value.body {
+            Body::alpine(b) => ("alpine", b.api_version.clone()),
+            Body::dsse(b) => ("dsse", b.api_version.clone()),
+            Body::helm(b) => ("helm", b.api_version.clone()),
+            Body::jar(b) => ("jar", b.api_version.clone()),
+            Body::rfc3161(b) => ("rfc3161", b.api_version.clone()),
+            Body::rpm(b) => ("rpm", b.api_version.clone()),
+            Body::tuf(b) => ("tuf", b.api_version.clone()),
+            Body::intoto(b) => ("intoto", b.api_version.clone()),
+            Body::hashedrekord(b) => ("hashedrekord", b.api_version.clone()),
+            Body::rekord(b) => ("rekord", b.api_version.clone()),
+        };
         let canonicalized_body = serde_json_canonicalizer::to_string(&value.body)
             .map_err(|_| ())?
             .into_bytes();
@@ -93,13 +115,47 @@ impl TryFrom<RekorLogEntry> for TransparencyLogEntry {
             inclusion_proof,
             integrated_time: value.integrated_time,
             kind_version: Some(KindVersion {
-                kind: "hashedrekord".to_owned(),
-                version: "0.0.1".to_owned(),
+                kind: kind.to_owned(),
+                version,
             }),
             log_id: Some(LogId {
                 key_id: decode_hex(value.log_i_d)?,
             }),
             log_index: value.log_index,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rekor::models::{DsseAllOf, HashedrekordAllOf};
+
+    #[test]
+    fn try_from_dsse_body_emits_dsse_kind_version() {
+        let entry = RekorLogEntry {
+            body: Body::dsse(DsseAllOf::new("0.0.1".to_owned(), serde_json::json!({}))),
+            ..Default::default()
+        };
+        let tle: TransparencyLogEntry = entry.try_into().expect("dsse conversion ok");
+        let kv = tle.kind_version.expect("kind_version present");
+        assert_eq!(kv.kind, "dsse");
+        assert_eq!(kv.version, "0.0.1");
+    }
+
+    #[test]
+    fn try_from_hashedrekord_body_emits_hashedrekord_kind_version() {
+        let entry = RekorLogEntry {
+            body: Body::hashedrekord(HashedrekordAllOf::new(
+                "0.0.1".to_owned(),
+                serde_json::json!({}),
+            )),
+            ..Default::default()
+        };
+        let tle: TransparencyLogEntry =
+            entry.try_into().expect("hashedrekord conversion ok");
+        let kv = tle.kind_version.expect("kind_version present");
+        assert_eq!(kv.kind, "hashedrekord");
+        assert_eq!(kv.version, "0.0.1");
     }
 }
