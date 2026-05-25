@@ -97,7 +97,16 @@ impl<'ctx> SigningSession<'ctx> {
                             oid: const_oid::db::rfc3280::EMAIL_ADDRESS,
                             value: AttributeValue::new(
                                 pkcs8::der::Tag::Utf8String,
-                                token.unverified_claims().email.as_ref(),
+                                // Workload-identity tokens have no email claim;
+                                // pass an empty string when absent. Fulcio derives
+                                // the cert identity from the OIDC token's claims
+                                // directly (sub/iss), not from the CSR subject,
+                                // so the empty value here is informational only.
+                                token
+                                    .unverified_claims()
+                                    .email
+                                    .as_deref()
+                                    .unwrap_or(""),
                             )?,
                         }
                     ].try_into()?

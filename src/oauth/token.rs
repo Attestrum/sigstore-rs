@@ -28,7 +28,12 @@ pub struct Claims {
     #[serde(with = "chrono::serde::ts_seconds_option")]
     #[serde(default)]
     pub nbf: Option<DateTime<Utc>>,
-    pub email: String,
+    // Optional: workload-identity tokens (GitHub Actions, GitLab CI, GCP service
+    // accounts, etc.) do not include an `email` claim. The pre-v0.14 hard
+    // requirement broke `IdentityToken::try_from` for every CI signing flow
+    // with the misleading "Malformed JWT: claims JSON malformed" error.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 pub type UnverifiedClaims = Claims;
