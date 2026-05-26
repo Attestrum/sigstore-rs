@@ -292,16 +292,20 @@ impl<'ctx> SigningSession<'ctx> {
                 )))?;
 
         // Assemble Sigstore Bundle v0.3 with DSSE envelope content.
-        let x509_certificate_chain = X509CertificateChain {
-            certificates: vec![X509Certificate {
-                raw_bytes: self.certs.cert.to_der()?,
-            }],
+        // Bundle v0.3 requires the single-leaf `Certificate` form (tag=5),
+        // not the legacy `X509CertificateChain` (tag=2) used by Bundle v0.2.
+        // sigstore-go's pkg/bundle/bundle.go enforces this at validate-time:
+        //   "verification material cannot be X.509 certificate chain (for bundle v0.3)"
+        // The intermediate + root certs are resolved at verify time via the
+        // verifier's Fulcio trust roots rather than carried in the bundle.
+        let leaf_certificate = X509Certificate {
+            raw_bytes: self.certs.cert.to_der()?,
         };
         let verification_material = Some(VerificationMaterial {
             timestamp_verification_data: None,
             tlog_entries: vec![log_entry],
-            content: Some(verification_material::Content::X509CertificateChain(
-                x509_certificate_chain,
+            content: Some(verification_material::Content::Certificate(
+                leaf_certificate,
             )),
         });
         Ok(Bundle {
